@@ -179,5 +179,24 @@ def main():
 if __name__ == '__main__':
     try:
         sys.exit(main())
+
     except (psycopg.Error, ValueError) as exc:
-        sys.exit(f'Collection failed ({type(exc).__name__}); check configuration and database schema.')
+        from urllib.parse import urlsplit, unquote
+
+        message = str(exc)
+        database_url = os.environ.get("DATABASE_URL", "")
+
+        if database_url:
+            message = message.replace(database_url, "[DATABASE_URL]")
+
+            try:
+                password = urlsplit(database_url).password
+                if password:
+                    for value in {password, unquote(password)}:
+                        message = message.replace(value, "[REDACTED]")
+            except ValueError:
+                pass
+
+        sys.exit(
+            f"Collection failed ({type(exc).__name__}): {message}"
+        )
