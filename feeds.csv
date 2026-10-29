@@ -1,0 +1,7 @@
+name,url,family,enabled
+Dawn - Home,https://www.dawn.com/feeds/home,dawn,1
+Express Tribune - Pakistan,https://tribune.com.pk/pakistan/feed/,tribune,1
+GN: KP conflict,https://news.google.com/rss/search?q=%22Khyber+Pakhtunkhwa%22+%28attack+OR+blast+OR+firing+OR+killed%29&hl=en-PK&gl=PK&ceid=PK%3Aen,aggregator,1
+GN: Balochistan conflict,https://news.google.com/rss/search?q=Balochistan+%28attack+OR+blast+OR+firing+OR+killed%29&hl=en-PK&gl=PK&ceid=PK%3Aen,aggregator,1
+GN: Bannu region,https://news.google.com/rss/search?q=%28Bannu+OR+%22Lakki+Marwat%22+OR+%22Dera+Ismail+Khan%22%29+%28attack+OR+firing%29&hl=en-PK&gl=PK&ceid=PK%3Aen,aggregator,1
+GN: ISPR statements,https://news.google.com/rss/search?q=ISPR+terrorists+killed&hl=en-PK&gl=PK&ceid=PK%3Aen,aggregator,1
