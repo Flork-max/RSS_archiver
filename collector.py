@@ -72,9 +72,10 @@ def load_feeds(path):
 
 def session():
     s = requests.Session()
-    s.headers['User-Agent'] = os.environ.get('NEWS_USER_AGENT', 'FYP-news-collector/1.0 (academic research)')
+    s.headers['User-Agent'] = os.environ.get('NEWS_USER_AGENT') or 'FYP-news-collector/1.0 (academic research)'
     retry = Retry(total=2, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504],
-                  allowed_methods=['GET'], raise_on_status=False)
+                  allowed_methods=['GET'], raise_on_status=False,
+                  respect_retry_after_header=False, backoff_max=10)
     s.mount('https://', HTTPAdapter(max_retries=retry))
     s.mount('http://', HTTPAdapter(max_retries=retry))
     return s
@@ -142,18 +143,67 @@ def collect(conn, client, feed):
     response, entries, error = None, [], ''
     try:
         response = client.get(feed['url'].strip(), headers=headers, timeout=(10,30))
-        seen = utcnow()  # time received, never the publisher's date
         if response.status_code == 200:
             entries = parse_feed(response.content, feed['name'])
-        elif response.status_code != 304:
-            error = f'HTTP {response.status_code}'
-    except (requests.RequestException, ValueError) as exc:
-        seen = utcnow()
-        error = type(exc).__name__  # avoid logging secrets or response contents
+        elif response.status_code == 403:
+            error = 'HTTP 403: access refused; skipped (not retried)'
+        elif response.status_code not in (200,304):
+            error = f'HTTP {response.status_code}: skipped after applicable retries'
+    except requests.Timeout:
+        error = 'Timeout: feed did not respond within the request timeout'
+    except requests.ConnectionError:
+        error = 'ConnectionError: unable to reach feed'
+    except requests.RequestException as exc:
+        error = f'{type(exc).__name__}: feed request failed'
+    except Exception as exc:
+        # Confine unexpected source/parsing errors to this feed. Database writes
+        # remain OUTSIDE this catch and must never be silently skipped.
+        entries = []
+        error = f'{type(exc).__name__}: invalid feed URL or unprocessable feed content'
+    seen = utcnow()  # observation time, never the publisher's date
     new, changed = persist(conn,feed,response,seen,entries,error) if conn is not None else (0,0)
-    print(f"{feed['name']}: HTTP {response.status_code if response is not None else 0}; "
+    status = response.status_code if response is not None else 0
+    label = 'SKIPPED' if error else 'OK'
+    print(f"[{label}] {feed['name']}: HTTP {status}; "
           f"{len(entries)} entries; {new} new; {changed} changed; {error or 'OK'}", flush=True)
-    return not error
+    if error and os.environ.get('GITHUB_ACTIONS') == 'true':
+        # Escape annotation control characters in configurable feed names.
+        msg = f"{feed['name']}: {error}".replace('%','%25').replace('\r','%0D').replace('\n','%0A')
+        print(f'::warning::{msg}', flush=True)
+    return dict(name=feed['name'], status=status, entries=len(entries),
+                new=new, changed=changed, error=error)
+
+
+def report(results):
+    failed = [r for r in results if r['error']]
+    print(f"\nCollection complete: {len(results)-len(failed)}/{len(results)} feeds OK; "
+          f"{len(failed)} skipped; {sum(r['new'] for r in results)} new; "
+          f"{sum(r['changed'] for r in results)} changed.", flush=True)
+    if failed:
+        print('Feeds needing attention:', flush=True)
+        for r in failed:
+            print(f"  - {r['name']}: {r['error']}", flush=True)
+    if failed and len(failed) == len(results):
+        print('WARNING: ALL FEEDS FAILED. No feed was collected successfully.', flush=True)
+    summary_path = os.environ.get('GITHUB_STEP_SUMMARY')
+    if summary_path:
+        def cell(value):
+            return html.escape(str(value)).replace('|', '&#124;').replace('\n',' ').replace('\r',' ')
+        lines = ['## News collection', '',
+                 f"{len(results)-len(failed)} feeds OK; {len(failed)} skipped.", '',
+                 '| Feed | HTTP | New | Changed | Result |', '| --- | --- | --- | --- | --- |']
+        for r in results:
+            lines.append('| ' + ' | '.join(cell(v) for v in
+                         (r['name'],r['status'],r['new'],r['changed'],r['error'] or 'OK')) + ' |')
+        if failed and len(failed) == len(results):
+            lines += ['', '**Warning: all feeds failed; no successful feed collection.**']
+        try:
+            with open(summary_path, 'a', encoding='utf-8') as f:
+                f.write('\n'.join(lines) + '\n')
+        except OSError:
+            print('WARNING: could not write Actions summary; see console output.', flush=True)
+    # Source failures are recorded in fetch_log and warnings, not a job failure.
+    return 0
 
 
 def main():
@@ -173,30 +223,23 @@ def main():
             with psycopg.connect(url, sslmode='require', connect_timeout=15,
                                  autocommit=True, prepare_threshold=None) as conn:
                 results = [collect(conn,client,f) for f in feeds]
-    return 0 if all(results) else 1  # partial feed failures are visible in Actions
+    return report(results)
 
 
 if __name__ == '__main__':
     try:
         sys.exit(main())
-
     except (psycopg.Error, ValueError) as exc:
-        from urllib.parse import urlsplit, unquote
-
         message = str(exc)
-        database_url = os.environ.get("DATABASE_URL", "")
-
+        database_url = os.environ.get('DATABASE_URL', '')
         if database_url:
-            message = message.replace(database_url, "[DATABASE_URL]")
-
+            message = message.replace(database_url, '[DATABASE_URL]')
             try:
+                from urllib.parse import unquote
                 password = urlsplit(database_url).password
                 if password:
-                    for value in {password, unquote(password)}:
-                        message = message.replace(value, "[REDACTED]")
+                    for value in sorted({password, unquote(password)}, key=len, reverse=True):
+                        message = message.replace(value, '[REDACTED]')
             except ValueError:
                 pass
-
-        sys.exit(
-            f"Collection failed ({type(exc).__name__}): {message}"
-        )
+        sys.exit(f'Collection failed ({type(exc).__name__}): {message}')
