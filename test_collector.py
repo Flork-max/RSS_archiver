@@ -41,4 +41,78 @@ class CollectorTests(unittest.TestCase):
     def test_meaningful_query_kept(self):
         self.assertEqual(normalize_link('https://example.org/?id=5&utm_source=x'),'https://example.org/?id=5')
 
+
+class FailureIsolationTests(unittest.TestCase):
+    def test_refused_feed_then_success(self):
+        from unittest.mock import Mock, patch
+        from collector import collect, report
+        import requests
+        blocked = requests.Response()
+        blocked.status_code = 403
+        blocked.url = 'https://example.org/refused'
+        good = requests.Response()
+        good.status_code = 200
+        good.url = 'https://example.org/rss'
+        good._content = rss()
+        client = Mock()
+        client.get.side_effect = [blocked, good]
+        conn = Mock()
+        conn.execute.return_value.fetchone.return_value = None
+        feed = dict(name='Feed',url=good.url,family='example')
+        with patch('collector.persist', return_value=(0,0)) as save:
+            first = collect(conn,client,feed)
+            second = collect(conn,client,feed)
+            self.assertIn('403',first['error'])
+            self.assertFalse(second['error'])
+            self.assertEqual(second['entries'],1)
+            self.assertEqual(save.call_count,2)
+            self.assertIn('403',save.call_args_list[0].args[-1])
+            self.assertEqual(report([first,second]),0)
+
+    def test_timeout_and_malformed_feed_are_skipped(self):
+        from unittest.mock import Mock
+        from collector import collect, report
+        import requests
+        client = Mock()
+        client.get.side_effect = requests.Timeout()
+        feed = dict(name='Feed',url='https://example.org/rss')
+        result = collect(None,client,feed)
+        self.assertIn('Timeout',result['error'])
+        self.assertEqual(report([result]),0)
+        client.get.side_effect = None
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b'<html>Access denied</html>'
+        client.get.return_value = response
+        self.assertTrue(collect(None,client,feed)['error'])
+
+    def test_database_failure_is_not_swallowed(self):
+        from unittest.mock import Mock, patch
+        from collector import collect
+        import requests
+        import psycopg
+        client = Mock()
+        response = requests.Response()
+        response.status_code = 403
+        client.get.return_value = response
+        conn = Mock()
+        conn.execute.return_value.fetchone.return_value = None
+        with patch('collector.persist',side_effect=psycopg.OperationalError('Unavailable')):
+            with self.assertRaises(psycopg.OperationalError):
+                collect(conn,client,dict(name='Feed',url='https://example.org/rss'))
+
+    def test_summary_file_lists_failures(self):
+        import os
+        import tempfile
+        from unittest.mock import patch
+        from collector import report
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d,'summary.md')
+            with patch.dict(os.environ, {'GITHUB_STEP_SUMMARY':path}):
+                self.assertEqual(report([dict(name='Blocked',status=403,new=0,changed=0,error='HTTP 403')]),0)
+            with open(path) as f:
+                text = f.read()
+            self.assertIn('HTTP 403',text)
+            self.assertIn('all feeds failed',text)
+
 if __name__ == '__main__': unittest.main()
